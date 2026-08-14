@@ -65,6 +65,17 @@
       "candidates": {"type": "array", "items": {"type": "string"}, "description": "Optional quick-select choices for a single question only. Leave empty for multi-questions"}}}
   }},
   {"type": "function", "function": {
+    "name": "mcp_tool",
+    "description": "通用MCP调用入口。默认使用 mykey.py 中的 zsxq_mcp 配置（url/api_key/timeout）。参数：method/name, params, timeout, cfg。",
+    "parameters": {"type": "object", "properties": {
+      "method": {"type": "string", "description": "MCP method name"},
+      "name": {"type": "string", "description": "method alias"},
+      "params": {"type": "object", "additionalProperties": true},
+      "timeout": {"type": "number"},
+      "cfg": {"type": "object", "additionalProperties": true}
+    }}}
+  },
+  {"type": "function", "function": {
     "name": "start_long_term_update",
     "description": "After a long task completes, distill long-term memory. Call when discovering info worth remembering (env facts/user prefs/lessons learned). Skip if memory already updated or in autonomous flow. Must call when a task that took 15+ turns is completed.",
     "parameters": {"type": "object", "properties": {}}}

@@ -311,3 +311,11 @@ mixin_config = {
 #     'secret_key': 'sk-lf-...',
 #     'host': 'https://cloud.langfuse.com',   # 或自托管地址
 # }
+
+# ZSXQ MCP 配置（用于 GA 直接调用知识星球 MCP）
+# 复制到 mykey.py 后按实际值修改；不要提交到公开仓库。
+# zsxq_mcp = {
+#     'url': 'https://mcp.zsxq.com/topic/mcp?api_key=your_api_key',
+#     'api_key': 'your_api_key',
+#     'timeout': 30,
+# }

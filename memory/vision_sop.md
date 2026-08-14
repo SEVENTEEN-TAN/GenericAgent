@@ -9,15 +9,22 @@
 ## 快速用法
 
 ```python
-from vision_api import ask_vision
+from memory.vision_api import ask_vision
 result = ask_vision(image, prompt="描述图片内容", timeout=60, max_pixels=1_440_000)
-# image: 文件路径(str/Path) 或 PIL Image
-# backend: 'claude'(默认) | 'openai' | 'modelscope'
-# 返回 str：成功为模型回复，失败为 'Error: ...'
+# image: 文件路径(str/Path) 或 PIL.Image
+# backend仅支持已验证的 'modelscope'（默认）
+# 返回str：成功为模型回复，失败为 'Error: ...'
 ```
 
-## 如果没有 `vision_api.py`，初次构建vision能力
+## 已验证的 ModelScope 实现
 
-1. 复制 `memory/vision_api.template.py` → `memory/vision_api.py`
-2. 只改头部"用户配置区"：去 `mykey.py` 里扫描变量名（⚠️ 只看名字，禁止输出 apikey 值），尝试找能用配置名填入 `CLAUDE_CONFIG_KEY` / `OPENAI_CONFIG_KEY`，`DEFAULT_BACKEND` 选后端，并测试
-3. 保底：没有可用 config 时去 `https://modelscope.cn/my/myaccesstoken` 申请 token 填入 `MODELSCOPE_API_KEY`
+- 接口：`POST https://api-inference.modelscope.cn/v1/chat/completions`
+- 模型：`Qwen/Qwen3-VL-235B-A22B-Instruct`
+- 协议：OpenAI-compatible；图片作为 JPEG data URL 放入 `image_url`
+- Token读取顺序：`MODELSCOPE_API_KEY`代码配置 → 同名环境变量 → `memory.keychain` 的 `modelscope_token`
+- Token禁止写入SOP、日志或L1；推荐存入keychain。
+- 免费接口可能返回HTTP 429；不要高频重试，间隔后再调用。
+
+## 验收
+
+用含已知文字的最小PIL图片调用 `ask_vision`，确认返回文字匹配；同时验证文件路径输入和超像素缩放。

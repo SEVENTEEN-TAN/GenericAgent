@@ -1,4 +1,4 @@
-import sys, os, re, json, time, threading, importlib, webbrowser
+import sys, os, re, json, time, threading, importlib, webbrowser, requests
 from datetime import datetime
 from pathlib import Path
 import tempfile, traceback, subprocess, itertools, collections, difflib, shutil
@@ -453,26 +453,204 @@ class GenericAgentHandler(BaseHandler):
         self.working['in_plan_mode'] = plan_path; self.max_turns = 100
         self.print(f"[Info] Entered plan mode with plan file: {plan_path}")
         return plan_path
-    def _check_plan_completion(self):
-        if not os.path.isfile(p:=self._in_plan_mode() or ''): return None
-        try: return len(re.findall(r'\[ \]', open(p, encoding='utf-8', errors='replace').read()))
-        except: return None
-    
-    def do_update_working_checkpoint(self, args, response):
-        '''为整个任务设定后续需要临时记忆的重点。'''
-        key_info = args.get("key_info", "")
-        if "key_info" in args: self.working['key_info'] = key_info
-        self.working['passed_sessions'] = 0
-        yield f"[Info] Updated key_info.\n"
-        next_prompt = self._get_anchor_prompt(skip=args.get('_index', 0) > 0)
-        if self.current_turn <= 1: next_prompt += "\n[TIPS] Working checkpoint updated. Do not call update_working_checkpoint again unless new, non-obvious facts appear. Skip for short tasks.\n"
-        #next_prompt += '\n[SYSTEM TIPS] 此函数一般在任务开始或中间时调用，如果任务已成功完成应该是start_long_term_update用于结算长期记忆。\n'
-        return StepOutcome({"result": "working key_info updated"}, next_prompt=next_prompt)
+    def _get_mcp_cfg(self, server=None):
+        try:
+            import mykey
+            if not server or server == 'zsxq':
+                return getattr(mykey, 'zsxq_mcp', None)
+            return (getattr(mykey, 'bigmodel_mcp', None) or {}).get(server)
+        except Exception:
+            return None
 
-    def _retry_or_exit(self, prompt):
-        self._empty_ct = getattr(self, '_empty_ct', 0) + 1
-        if self._empty_ct >= 3: return StepOutcome({}, should_exit=True)
-        return StepOutcome({}, next_prompt=prompt)
+    @staticmethod
+    def _mcp_timeout(cfg, timeout):
+        try:
+            return float(timeout if timeout is not None else cfg.get('timeout', 30))
+        except Exception:
+            return 30
+
+    @staticmethod
+    def _mcp_payload(method, params=None, request_id=None):
+        payload = {'jsonrpc': '2.0', 'method': method}
+        if request_id is not None:
+            payload['id'] = request_id
+        if params is not None:
+            payload['params'] = params
+        return payload
+
+    @staticmethod
+    def _parse_mcp_response(resp):
+        chunks = []
+        for line in resp.iter_lines(decode_unicode=True):
+            if not line:
+                continue
+            if line.startswith('data:'):
+                chunks.append(line[5:].strip())
+            elif line.startswith('{'):
+                chunks.append(line.strip())
+        raw = '\n'.join(chunks).strip()
+        if not raw:
+            return {'status': 'ok', 'raw': ''}
+        for item in reversed(chunks):
+            try:
+                parsed = json.loads(item)
+                if isinstance(parsed, dict) and ('result' in parsed or 'error' in parsed):
+                    return parsed
+            except Exception:
+                pass
+        try:
+            return json.loads(raw)
+        except Exception:
+            return {'status': 'ok', 'raw': raw}
+
+    def _http_mcp_request(self, method, params, cfg, timeout):
+        url = cfg.get('url') or cfg.get('endpoint') or cfg.get('base_url')
+        if not url:
+            return {'status': 'error', 'msg': 'MCP url missing'}
+        headers = {'Content-Type': 'application/json', 'Accept': 'application/json, text/event-stream'}
+        headers.update(cfg.get('headers') or {})
+        api_key = cfg.get('api_key') or cfg.get('apikey') or cfg.get('token')
+        if api_key and 'Authorization' not in headers:
+            headers['Authorization'] = f'Bearer {api_key}'
+        request_id = f'ga-{int(time.time()*1000)}'
+        try:
+            with requests.Session() as session:
+                if cfg.get('initialize') and method != 'initialize':
+                    init = self._mcp_payload('initialize', {
+                        'protocolVersion': '2025-03-26',
+                        'capabilities': {},
+                        'clientInfo': {'name': 'GenericAgent', 'version': '1.0'},
+                    }, request_id + '-init')
+                    init_resp = session.post(url, json=init, headers=headers, stream=True, timeout=timeout)
+                    init_resp.raise_for_status()
+                    session_id = init_resp.headers.get('Mcp-Session-Id')
+                    self._parse_mcp_response(init_resp)
+                    init_resp.close()
+                    if session_id:
+                        headers['Mcp-Session-Id'] = session_id
+                    ready = self._mcp_payload('notifications/initialized')
+                    ready_resp = session.post(url, json=ready, headers=headers, timeout=timeout)
+                    if ready_resp.status_code not in (200, 202, 204):
+                        ready_resp.raise_for_status()
+                    ready_resp.close()
+                payload = self._mcp_payload(method, params or {}, request_id)
+                resp = session.post(url, json=payload, headers=headers, stream=True, timeout=timeout)
+                resp.raise_for_status()
+                try:
+                    return self._parse_mcp_response(resp)
+                finally:
+                    resp.close()
+        except Exception as e:
+            return {'status': 'error', 'msg': str(e)}
+
+    def _stdio_mcp_request(self, method, params, cfg, timeout):
+        command = cfg.get('command')
+        if not command:
+            return {'status': 'error', 'msg': 'MCP stdio command missing'}
+        cmd = [command] + list(cfg.get('args') or [])
+        resolved = shutil.which(command)
+        if os.name == 'nt' and resolved and resolved.lower().endswith(('.cmd', '.bat')):
+            cmd = [os.environ.get('COMSPEC', 'cmd.exe'), '/d', '/s', '/c', resolved] + cmd[1:]
+        env = os.environ.copy()
+        env.update({str(k): str(v) for k, v in (cfg.get('env') or {}).items()})
+        proc = None
+        messages = []
+        errors = []
+        out_queue = collections.deque()
+        done = threading.Event()
+
+        def read_stdout():
+            try:
+                for line in proc.stdout:
+                    line = line.strip()
+                    if line:
+                        out_queue.append(line)
+            finally:
+                done.set()
+
+        def read_stderr():
+            for line in proc.stderr:
+                if line.strip():
+                    errors.append(line.strip())
+
+        try:
+            proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                    stderr=subprocess.PIPE, text=True, encoding='utf-8',
+                                    errors='replace', env=env)
+            threading.Thread(target=read_stdout, daemon=True).start()
+            threading.Thread(target=read_stderr, daemon=True).start()
+
+            def send(payload):
+                proc.stdin.write(json.dumps(payload, ensure_ascii=False) + '\n')
+                proc.stdin.flush()
+
+            def wait_for(request_id):
+                deadline = time.time() + timeout
+                while time.time() < deadline:
+                    while out_queue:
+                        raw = out_queue.popleft()
+                        try:
+                            item = json.loads(raw)
+                            messages.append(item)
+                            if item.get('id') == request_id:
+                                return item
+                        except Exception:
+                            pass
+                    if done.is_set() and not out_queue:
+                        break
+                    time.sleep(0.02)
+                detail = errors[-1] if errors else 'request timed out'
+                return {'status': 'error', 'msg': detail}
+
+            send(self._mcp_payload('initialize', {
+                'protocolVersion': '2025-03-26',
+                'capabilities': {},
+                'clientInfo': {'name': 'GenericAgent', 'version': '1.0'},
+            }, 'ga-init'))
+            initialized = wait_for('ga-init')
+            if initialized.get('status') == 'error' or initialized.get('error'):
+                return initialized
+            if method == 'initialize':
+                return initialized
+            send(self._mcp_payload('notifications/initialized'))
+            send(self._mcp_payload(method, params or {}, 'ga-request'))
+            return wait_for('ga-request')
+        except Exception as e:
+            return {'status': 'error', 'msg': str(e)}
+        finally:
+            if proc is not None:
+                try:
+                    proc.terminate()
+                    proc.wait(timeout=2)
+                except Exception:
+                    try:
+                        proc.kill()
+                    except Exception:
+                        pass
+
+    def _mcp_request(self, method, params=None, cfg=None, timeout=None):
+        cfg = cfg or {}
+        to = self._mcp_timeout(cfg, timeout)
+        if cfg.get('type') == 'stdio':
+            return self._stdio_mcp_request(method, params, cfg, to)
+        return self._http_mcp_request(method, params, cfg, to)
+
+    def do_mcp_tool(self, args, response):
+        '''通用MCP调用入口。server 可选 zsxq、vision、search、reader、zread；默认 zsxq。'''
+        method = args.get('method') or args.get('name')
+        if not method:
+            return StepOutcome({'status': 'error', 'msg': 'method missing'}, next_prompt='\n')
+        params = args.get('params') or {}
+        server = args.get('server') or 'zsxq'
+        cfg = args.get('cfg') or self._get_mcp_cfg(server)
+        if not cfg:
+            result = {'status': 'error', 'msg': f'MCP server not configured: {server}'}
+        else:
+            result = self._mcp_request(method, params=params, cfg=cfg, timeout=args.get('timeout'))
+        yield f"[MCP:{server}] {method} -> {result.get('status', 'ok')}\n"
+        next_prompt = self._get_anchor_prompt(skip=args.get('_index', 0) > 0)
+        return StepOutcome(smart_format(json.dumps(result, ensure_ascii=False, default=json_default), max_str_len=self._get_tool_maxlen(12000, args)), next_prompt=next_prompt)
+
 
     def do_no_tool(self, args, response):
         '''这是一个特殊工具，由引擎自主调用，不要包含在TOOLS_SCHEMA里。

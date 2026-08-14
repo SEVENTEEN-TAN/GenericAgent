@@ -10,7 +10,8 @@
 
 ## 限制(isTrusted)
 - JS事件`isTrusted=false`，敏感操作（如文件上传/部分按钮）可能被拦截；这类场景首选**CDP桥**
-- ⚠JS点击按钮打不开新tab→可能是浏览器弹窗拦截，换CDP点击试试
+- SPA 中输入值变化或合成 Enter 不等于提交成功；提交后核对 URL 与结果区等业务副作用，未变化时用 CDP 点击可见且未禁用的提交控件并再次复核
+- ⚠JS点击按钮打不开新tab→可能是浏览器弹窗拦截，换CDP点击试试。若 SPA 点击处理器通过 `window.open` 动态生成详情 URL、CDP 仍未开页，可在可见源页临时替换 `window.open` 仅捕获处理器实际传入的 URL，执行一次原点击后立即恢复；只用捕获值导航并刷新复载核验，禁按路径规律猜 URL，ACK/超时不算导航成功
 - Vue3自定义组件(Select/Dropdown)：⭐优先vnode实例调用(无视口限制)→见**vue3_component_sop**；CDP坐标点击仅适合选项少且可见的场景
 - 文件上传：⭐首选**DataTransfer API**（纯JS，无CDP依赖）：`new File([content],name,{type}) → new DataTransfer().items.add(file) → input.files=dt.files → dispatch input+change`；CDP `DOM.setFileInputFiles` 在tmwd桥环境nodeId跨调用失效，不推荐；备选ljqCtrl物理点击
 - 需转物理坐标时：`physX = (screenX + rect中心x) * dpr`，`physY = (screenY + chromeH + rect中心y) * dpr`；其中 `chromeH = outerHeight - innerHeight`
