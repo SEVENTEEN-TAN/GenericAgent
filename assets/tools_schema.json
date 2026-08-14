@@ -66,8 +66,9 @@
   }},
   {"type": "function", "function": {
     "name": "mcp_tool",
-    "description": "通用MCP调用入口。默认使用 mykey.py 中的 zsxq_mcp 配置（url/api_key/timeout）。参数：method/name, params, timeout, cfg。",
+    "description": "通用MCP调用入口。server选择目标：zsxq(默认)/vision/search/reader/zread，配置在mykey.py的zsxq_mcp与bigmodel_mcp。参数：server, method/name, params, timeout, cfg。",
     "parameters": {"type": "object", "properties": {
+      "server": {"type": "string", "description": "MCP server: zsxq(default)/vision/search/reader/zread"},
       "method": {"type": "string", "description": "MCP method name"},
       "name": {"type": "string", "description": "method alias"},
       "params": {"type": "object", "additionalProperties": true},
